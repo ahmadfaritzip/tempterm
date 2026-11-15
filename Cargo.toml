@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/temp-terminal-proto",
+    "crates/temp-terminal-pty",
+    "crates/temp-terminal-term",
+    "crates/temp-terminal-detect",
+    "crates/temp-terminal-procs",
+    "crates/temp-terminal-core",
+    "crates/temp-terminal-daemon",
+    "crates/temp-terminal-cli",
+    "crates/temp-terminal-ui",
+    "crates/temp-terminal-rig",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["temp-terminal contributors"]
+license = "MIT"
+repository = "https://github.com/temp-terminal/temp-terminal"
+
+[workspace.dependencies]
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bytes = "1.9"
+tokio = { version = "1.42", features = ["full"] }
+tokio-util = "0.7"
+thiserror = "2.0"
+tracing = "0.1"
+temp-terminal-proto = { path = "crates/temp-terminal-proto" }
+temp-terminal-pty = { path = "crates/temp-terminal-pty" }
+temp-terminal-term = { path = "crates/temp-terminal-term" }
+temp-terminal-detect = { path = "crates/temp-terminal-detect" }
+temp-terminal-procs = { path = "crates/temp-terminal-procs" }
+temp-terminal-core = { path = "crates/temp-terminal-core" }
+temp-terminal-daemon = { path = "crates/temp-terminal-daemon" }
+temp-terminal-ui = { path = "crates/temp-terminal-ui" }
+temp-terminal-rig = { path = "crates/temp-terminal-rig" }

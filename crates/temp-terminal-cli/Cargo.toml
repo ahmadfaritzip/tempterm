@@ -1,0 +1,21 @@
+[package]
+name = "temp-terminal-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+temp-terminal-proto = { workspace = true }
+temp-terminal-core = { workspace = true }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+temp-terminal-daemon = { workspace = true }
+temp-terminal-procs = { workspace = true }
+
+[[bin]]
+name = "temp-terminal"
+path = "src/main.rs"
