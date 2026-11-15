@@ -49,6 +49,8 @@ async fn setup_test_app() -> (WorkspaceApp, mpsc::Receiver<Vec<u8>>) {
             cursor_visible: true,
             scrollback_len: 0,
             detected_agent: None,
+            active_process: None,
+            running_command: None,
         },
     );
 
@@ -432,3 +434,71 @@ async fn test_modal_closed_this_frame_suppresses_esc_to_terminal() {
     );
     assert!(rx.try_recv().is_err(), "No bytes should have reached the PTY");
 }
+
+#[test]
+fn test_detect_command_from_terminal_lines() {
+    let lines = vec![
+        "Windows PowerShell".to_string(),
+        "PS C:\\Users\\Asus\\project> npm run dev".to_string(),
+        "  VITE v5.4.1 ready in 250 ms".to_string(),
+        "  ➜  Local:   http://localhost:5173/".to_string(),
+    ];
+    let cmd = WorkspaceApp::detect_command_from_terminal_lines(&lines);
+    assert_eq!(cmd.as_deref(), Some("npm run dev"));
+
+    // PowerShell with ANSI syntax highlighting
+    let ansi_lines = vec![
+        "\x1b[93mPS C:\\Users\\Asus\\project>\x1b[0m \x1b[92mcargo run --bin temp-terminal-gui\x1b[0m".to_string(),
+        "   Compiling temp-terminal-ui v0.1.0".to_string(),
+    ];
+    let cmd_ansi = WorkspaceApp::detect_command_from_terminal_lines(&ansi_lines);
+    assert_eq!(cmd_ansi.as_deref(), Some("cargo run --bin temp-terminal-gui"));
+
+    // Cmd.exe prompt
+    let cmd_lines = vec![
+        "C:\\Users\\Asus> python -m http.server 8080".to_string(),
+        "Serving HTTP on 0.0.0.0 port 8080 ...".to_string(),
+    ];
+    let cmd2 = WorkspaceApp::detect_command_from_terminal_lines(&cmd_lines);
+    assert_eq!(cmd2.as_deref(), Some("python -m http.server 8080"));
+}
+
+#[test]
+fn test_pane_header_title_with_os_active_process() {
+    // 1. Idle shell without any active child process
+    let title_idle = WorkspaceApp::compute_pane_title(None, None, None);
+    assert_eq!(title_idle, "Terminal");
+
+    // 2. Active OS child process: node running npm run dev
+    let title_npm = WorkspaceApp::compute_pane_title(
+        None,
+        Some("node"),
+        Some("npm run dev"),
+    );
+    assert_eq!(title_npm, "Terminal: npm run dev");
+
+    // 3. Active OS child process: cargo running cargo test
+    let title_cargo = WorkspaceApp::compute_pane_title(
+        None,
+        Some("cargo"),
+        Some("cargo test"),
+    );
+    assert_eq!(title_cargo, "Terminal: cargo test");
+
+    // 4. Active OS child process without known prompt command line
+    let title_py = WorkspaceApp::compute_pane_title(
+        None,
+        Some("python"),
+        None,
+    );
+    assert_eq!(title_py, "Terminal: python");
+
+    // 5. Active agent: agy
+    let title_agy = WorkspaceApp::compute_pane_title(
+        Some("Antigravity"),
+        Some("agy"),
+        Some("agy"),
+    );
+    assert_eq!(title_agy, "Terminal (Antigravity)");
+}
+

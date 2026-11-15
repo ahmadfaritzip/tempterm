@@ -320,6 +320,8 @@ pub struct PaneRenderSnapshot {
     pub cursor_visible: bool,
     pub scrollback_len: usize,
     pub detected_agent: Option<String>,
+    pub active_process: Option<String>,
+    pub running_command: Option<String>,
 }
 
 /// Snapshot of the workspace state used for immediate-mode rendering without locking.
@@ -1496,8 +1498,38 @@ impl WorkspaceApp {
                                 active_pane_lines = lines.clone();
                             }
 
-                            let detected_agent = Self::detect_agent_from_terminal_lines(&lines)
+                            let active_process = pane.active_foreground_process();
+                            let running_command = if active_process.is_some() {
+                                Self::detect_command_from_terminal_lines(&lines)
+                            } else {
+                                None
+                            };
+
+                            let mut detected_agent = Self::detect_agent_from_terminal_lines(&lines)
                                 .map(|(name, _)| name.to_string());
+
+                            // If pane has a live PTY and no child process is running,
+                            // then the shell is idle; clear any lingering agent state.
+                            if pane.pane_ref.is_some() && active_process.is_none() {
+                                detected_agent = None;
+                            } else if detected_agent.is_none() {
+                                // If screen text didn't catch it yet, but OS process is an agent, auto-detect from OS process
+                                if let Some(ref proc) = active_process {
+                                    let lower = proc.to_lowercase();
+                                    let base = lower.trim_end_matches(".exe");
+                                    if base == "agy" || base == "antigravity" {
+                                        detected_agent = Some("Antigravity".to_string());
+                                    } else if base == "claude" || base == "claude-code" {
+                                        detected_agent = Some("Claude Code".to_string());
+                                    } else if base == "pi" || base == "omp" {
+                                        detected_agent = Some("Pi Agent".to_string());
+                                    } else if base == "codex" {
+                                        detected_agent = Some("Codex CLI".to_string());
+                                    } else if base == "opencode" {
+                                        detected_agent = Some("OpenCode".to_string());
+                                    }
+                                }
+                            }
 
                             pane_snapshots.insert(
                                 p_id.clone(),
@@ -1511,6 +1543,8 @@ impl WorkspaceApp {
                                     cursor_visible: c_vis,
                                     scrollback_len: sb_len,
                                     detected_agent,
+                                    active_process,
+                                    running_command,
                                 },
                             );
                         }
@@ -1693,12 +1727,37 @@ impl WorkspaceApp {
                 for (s_id, s) in &proj.sessions {
                     if s_id != &active_session_id {
                         for pane in s.panes.values() {
-                            if let Ok(buf) = pane.buffer.try_read() {
+                            let active_proc = pane.active_foreground_process();
+                            let mut ag_found = if let Ok(buf) = pane.buffer.try_read() {
                                 let lines = buf.render_view();
-                                if let Some((name, bin)) = Self::detect_agent_from_terminal_lines(&lines) {
-                                    if !active_agents.iter().any(|(n, _)| n == name) {
-                                        active_agents.push((name.to_string(), bin.to_string()));
+                                Self::detect_agent_from_terminal_lines(&lines)
+                            } else {
+                                None
+                            };
+
+                            if pane.pane_ref.is_some() && active_proc.is_none() {
+                                ag_found = None;
+                            } else if ag_found.is_none() {
+                                if let Some(ref proc) = active_proc {
+                                    let lower = proc.to_lowercase();
+                                    let base = lower.trim_end_matches(".exe");
+                                    if base == "agy" || base == "antigravity" {
+                                        ag_found = Some(("Antigravity", "agy"));
+                                    } else if base == "claude" || base == "claude-code" {
+                                        ag_found = Some(("Claude Code", "claude"));
+                                    } else if base == "pi" || base == "omp" {
+                                        ag_found = Some(("Pi Agent", "pi"));
+                                    } else if base == "codex" {
+                                        ag_found = Some(("Codex CLI", "codex"));
+                                    } else if base == "opencode" {
+                                        ag_found = Some(("OpenCode", "opencode"));
                                     }
+                                }
+                            }
+
+                            if let Some((name, bin)) = ag_found {
+                                if !active_agents.iter().any(|(n, _)| n == name) {
+                                    active_agents.push((name.to_string(), bin.to_string()));
                                 }
                             }
                         }
@@ -3574,6 +3633,100 @@ pub fn strip_ansi(s: &str) -> String {
         None
     }
 
+    /// Extracts the most recent command line executed at a shell prompt (e.g. `npm run dev`, `cargo run`).
+    pub fn detect_command_from_terminal_lines(lines: &[String]) -> Option<String> {
+        for line in lines.iter().rev().take(40) {
+            let clean = Self::strip_ansi(line);
+            let trimmed = clean.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+
+            // Check for standard Windows and Unix shell prompt formats
+            let is_ps_prompt = trimmed.starts_with("PS ") && trimmed.contains('>');
+            let is_cmd_prompt = trimmed.len() >= 3
+                && trimmed.as_bytes()[1] == b':'
+                && (trimmed.as_bytes()[2] == b'\\' || trimmed.as_bytes()[2] == b'/')
+                && trimmed.contains('>');
+            let is_unix_prompt = (trimmed.contains('@') && (trimmed.contains(':') || trimmed.contains('$')))
+                || trimmed.starts_with("❯ ")
+                || trimmed.starts_with("$ ")
+                || trimmed.starts_with("# ");
+
+            let is_generic_prompt = trimmed.contains('>') && (trimmed.contains(":\\") || trimmed.contains(":/"));
+
+            if !is_ps_prompt && !is_cmd_prompt && !is_unix_prompt && !is_generic_prompt {
+                continue;
+            }
+
+            let cmd_str = if let Some(idx) = trimmed.rfind('>').or_else(|| trimmed.rfind('$')).or_else(|| trimmed.rfind('#')).or_else(|| trimmed.rfind('%')) {
+                trimmed[idx + 1..].trim()
+            } else if let Some(idx) = trimmed.rfind('❯') {
+                let char_len = trimmed[idx..].chars().next().map_or(1, |c| c.len_utf8());
+                trimmed[idx + char_len..].trim()
+            } else {
+                ""
+            };
+
+            if cmd_str.is_empty() {
+                // If the most recent prompt line on screen is empty, the shell is idle!
+                return None;
+            } else {
+                return Some(cmd_str.to_string());
+            }
+        }
+        None
+    }
+
+    /// Computes the dynamic title for a terminal pane header.
+    ///
+    /// If an agent is running (e.g. Antigravity, Claude Code), returns `Terminal (AgentName)`.
+    /// If an OS background process is running (e.g. node, cargo, python), returns `Terminal: <command_line>` or `Terminal: <process_name>`.
+    /// If the shell is idle, returns `Terminal`.
+    pub fn compute_pane_title(
+        detected_agent: Option<&str>,
+        active_process: Option<&str>,
+        command_line: Option<&str>,
+    ) -> String {
+        if let Some(agent) = detected_agent {
+            return format!("Terminal ({})", agent);
+        }
+
+        if let Some(proc) = active_process {
+            let lower_proc = proc.to_lowercase();
+            let proc_base = lower_proc.trim_end_matches(".exe");
+
+            // Agent executable names
+            if proc_base == "agy" || proc_base == "antigravity" {
+                return "Terminal (Antigravity)".to_string();
+            }
+            if proc_base == "claude" || proc_base == "claude-code" {
+                return "Terminal (Claude Code)".to_string();
+            }
+            if proc_base == "pi" || proc_base == "omp" {
+                return "Terminal (Pi Agent)".to_string();
+            }
+            if proc_base == "codex" {
+                return "Terminal (Codex CLI)".to_string();
+            }
+            if proc_base == "opencode" {
+                return "Terminal (OpenCode)".to_string();
+            }
+
+            // Check if command line is available
+            if let Some(cmd) = command_line {
+                let trimmed_cmd = cmd.trim();
+                if !trimmed_cmd.is_empty() {
+                    return format!("Terminal: {}", trimmed_cmd);
+                }
+            }
+
+            return format!("Terminal: {}", proc_base);
+        }
+
+        "Terminal".to_string()
+    }
+
     /// Queries the current git branch for a directory.
     pub fn query_git_branch(dir: &std::path::Path) -> Option<String> {
         if !dir.is_dir() {
@@ -5080,17 +5233,18 @@ pub fn strip_ansi(s: &str) -> String {
                     ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                         ui.spacing_mut().item_spacing.x = 8.0;
 
-                        let detected_agent = self
-                            .snapshot
-                            .panes
-                            .get(pane_id)
-                            .and_then(|p| p.detected_agent.clone());
+                        let pane_snap = self.snapshot.panes.get(pane_id);
+                        let detected_agent = pane_snap.and_then(|p| p.detected_agent.as_deref());
+                        let active_proc = pane_snap.and_then(|p| p.active_process.as_deref());
+                        let running_cmd = pane_snap.and_then(|p| p.running_command.as_deref());
 
                         // Terminal prompt icon (14x14)
                         let (icon_r, _) =
                             ui.allocate_exact_size(Vec2::new(14.0, 14.0), Sense::hover());
                         if detected_agent.is_some() {
                             Icons::draw_agent(&ui.painter(), icon_r, theme::SUCCESS);
+                        } else if active_proc.is_some() {
+                            Icons::draw_process(&ui.painter(), icon_r, theme::INFO);
                         } else {
                             Icons::draw_terminal(
                                 &ui.painter(),
@@ -5103,12 +5257,8 @@ pub fn strip_ansi(s: &str) -> String {
                             );
                         }
 
-                        // Clean terminal title
-                        let title_text = if let Some(ref ag_name) = detected_agent {
-                            format!("Terminal ({})", ag_name)
-                        } else {
-                            "Terminal".to_string()
-                        };
+                        // Dynamic terminal title reflecting running command, agent, or idle state
+                        let title_text = Self::compute_pane_title(detected_agent, active_proc, running_cmd);
 
                         let title_resp = ui.add(
                             egui::Label::new(
