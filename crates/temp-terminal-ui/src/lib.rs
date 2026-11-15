@@ -1059,6 +1059,13 @@ impl TerminalPane {
         }
         Ok(())
     }
+
+    /// Returns the active foreground child process name if one is running in this pane.
+    pub fn active_foreground_process(&self) -> Option<String> {
+        self.pane_ref
+            .as_ref()
+            .and_then(|p| p.active_foreground_process())
+    }
 }
 
 /// Represents an application session containing split tabs and terminal panes.

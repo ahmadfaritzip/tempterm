@@ -1822,3 +1822,59 @@ async fn test_terminal_clipboard_get_set_roundtrip_and_paste() {
     );
 }
 
+#[tokio::test]
+async fn test_terminal_pane_reports_active_foreground_process() {
+    let registry = Arc::new(Registry::new());
+    let host = AppHost::new(None);
+    let tmp = std::env::temp_dir();
+
+    host.add_project("p_fg", "FgTestProject", tmp.clone()).await;
+
+    let pane = host
+        .spawn_local_pane(
+            "p_fg",
+            "s_fg",
+            "pane_fg",
+            80,
+            24,
+            &registry,
+            vec!["cmd.exe".to_string(), "cmd".to_string(), "/k".to_string()],
+            tmp.to_string_lossy().to_string(),
+        )
+        .await
+        .expect("spawn local pane");
+
+    // Idle shell should return None for active foreground process
+    assert_eq!(
+        pane.active_foreground_process(),
+        None,
+        "Idle shell pane must have no active child process"
+    );
+
+    // Launch a child process
+    pane.send_input(b"ping 127.0.0.1 -n 3\r\n")
+        .await
+        .expect("send input");
+
+    let mut detected = None;
+    for _ in 0..30 {
+        sleep(Duration::from_millis(100)).await;
+        if let Some(proc_name) = pane.active_foreground_process() {
+            detected = Some(proc_name);
+            break;
+        }
+    }
+
+    assert!(
+        detected.is_some(),
+        "TerminalPane must detect child process running in PTY"
+    );
+    let proc_str = detected.unwrap().to_lowercase();
+    assert!(
+        proc_str.contains("ping"),
+        "Detected process should be ping, got: {}",
+        proc_str
+    );
+}
+
+

@@ -95,6 +95,13 @@ impl Pane {
             proc.stop(Duration::from_millis(300));
         }
     }
+
+    /// Returns the active foreground child process name running under this pane's PTY.
+    pub fn active_foreground_process(&self) -> Option<String> {
+        self.proc
+            .as_ref()
+            .and_then(|p| p.active_foreground_process())
+    }
 }
 
 pub type OutputSubscriber = Arc<dyn Fn(&str, &[u8]) + Send + Sync>;
