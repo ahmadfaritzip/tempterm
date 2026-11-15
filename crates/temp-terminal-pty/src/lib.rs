@@ -29,9 +29,10 @@ use windows_sys::Win32::System::JobObjects::{
 use windows_sys::Win32::System::Pipes::CreatePipe;
 use windows_sys::Win32::System::Threading::{
     CreateProcessW, DeleteProcThreadAttributeList, GetExitCodeProcess,
-    InitializeProcThreadAttributeList, ResumeThread, TerminateProcess, UpdateProcThreadAttribute,
-    WaitForSingleObject, CREATE_SUSPENDED, CREATE_UNICODE_ENVIRONMENT,
-    EXTENDED_STARTUPINFO_PRESENT, INFINITE, LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION,
+    InitializeProcThreadAttributeList, OpenProcess, QueryFullProcessImageNameW, ResumeThread,
+    TerminateProcess, UpdateProcThreadAttribute, WaitForSingleObject, CREATE_SUSPENDED,
+    CREATE_UNICODE_ENVIRONMENT, EXTENDED_STARTUPINFO_PRESENT, INFINITE,
+    LPPROC_THREAD_ATTRIBUTE_LIST, PROCESS_INFORMATION, PROCESS_QUERY_LIMITED_INFORMATION,
     STARTF_USESTDHANDLES, STARTUPINFOEXW,
 };
 
@@ -448,6 +449,74 @@ impl PtyProc {
             slice.iter().map(|&pid| pid as u32).collect()
         }
     }
+
+    /// Returns process IDs attached to the JobObject, excluding the root shell PID.
+    pub fn active_child_pids(&self) -> Vec<u32> {
+        let root_pid = self.pid();
+        self.job_pids()
+            .into_iter()
+            .filter(|&pid| pid != root_pid && pid != 0)
+            .collect()
+    }
+
+    /// Inspects processes currently attached to the JobObject to find the active foreground process
+    /// running under the shell (e.g. `node.exe`, `cargo.exe`, `ping.exe`, `agy.exe`).
+    ///
+    /// Filters out console host helper processes (`conhost.exe`, `openconsole.exe`)
+    /// and root shell processes (`powershell.exe`, `pwsh.exe`, `cmd.exe`).
+    pub fn active_foreground_process(&self) -> Option<String> {
+        let child_pids = self.active_child_pids();
+        if child_pids.is_empty() {
+            return None;
+        }
+
+        // Iterate child PIDs in reverse (most recently spawned process first)
+        for &pid in child_pids.iter().rev() {
+            if let Some(name) = query_process_name(pid) {
+                let lower = name.to_lowercase();
+                // Filter out ConPTY internal console hosts and shell wrappers
+                if lower == "conhost.exe"
+                    || lower == "openconsole.exe"
+                    || lower == "cmd.exe"
+                    || lower == "powershell.exe"
+                    || lower == "pwsh.exe"
+                {
+                    continue;
+                }
+                return Some(name);
+            }
+        }
+
+        None
+    }
+}
+
+/// Queries the executable image name of a process given its PID.
+pub fn query_process_name(pid: u32) -> Option<String> {
+    if pid == 0 {
+        return None;
+    }
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid) };
+    if handle.is_null() {
+        return None;
+    }
+
+    let mut buf = [0u16; 1024];
+    let mut size = buf.len() as u32;
+    let res = unsafe { QueryFullProcessImageNameW(handle, 0, buf.as_mut_ptr(), &mut size) };
+    unsafe { CloseHandle(handle) };
+
+    if res == FALSE || size == 0 {
+        return None;
+    }
+
+    let full_path = String::from_utf16_lossy(&buf[..size as usize]);
+    let file_name = std::path::Path::new(&full_path)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .unwrap_or(full_path);
+
+    Some(file_name)
 }
 
 // -----------------------------------------------------------------------------

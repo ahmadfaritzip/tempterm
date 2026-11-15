@@ -140,3 +140,65 @@ fn test_resize_and_stop() {
 
     assert!(!pty.is_alive());
 }
+
+#[test]
+fn test_query_process_name_current_process() {
+    let current_pid = std::process::id();
+    let name = temp_terminal_pty::query_process_name(current_pid);
+    assert!(name.is_some(), "Current process name must be queryable");
+    let proc_name = name.unwrap().to_lowercase();
+    assert!(
+        proc_name.ends_with(".exe") || !proc_name.is_empty(),
+        "Expected executable name, got: {}",
+        proc_name
+    );
+}
+
+#[test]
+fn test_active_foreground_process_detection_in_pty() {
+    // Start cmd.exe in interactive mode
+    let opts = PtyOptions {
+        path: "cmd.exe".to_string(),
+        args: vec!["cmd.exe".to_string(), "/k".to_string()],
+        cols: 80,
+        rows: 24,
+        ..Default::default()
+    };
+
+    let pty = PtyProc::start(opts).expect("start conpty");
+    assert!(pty.is_alive());
+
+    // Initially, only cmd.exe (root) and conhost are running, so active foreground process is None (idle shell)
+    let initial_proc = pty.active_foreground_process();
+    assert_eq!(
+        initial_proc, None,
+        "Idle shell must have no active child process"
+    );
+
+    // Launch a child process that runs for a moment: e.g. ping 127.0.0.1 -n 3
+    pty.write_in(b"ping 127.0.0.1 -n 3\r\n").expect("write command");
+
+    // Wait a short moment for child process to appear in the job
+    let mut detected = None;
+    for _ in 0..30 {
+        std::thread::sleep(Duration::from_millis(100));
+        if let Some(proc) = pty.active_foreground_process() {
+            detected = Some(proc);
+            break;
+        }
+    }
+
+    assert!(
+        detected.is_some(),
+        "Expected ping.exe to be detected as active foreground process"
+    );
+    let proc_str = detected.unwrap().to_lowercase();
+    assert!(
+        proc_str.contains("ping"),
+        "Expected process name to contain 'ping', got: {}",
+        proc_str
+    );
+
+    // Clean up
+    pty.stop(Duration::from_millis(200));
+}
